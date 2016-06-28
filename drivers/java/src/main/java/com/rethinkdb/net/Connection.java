@@ -23,6 +23,7 @@ import java.util.Optional;
 import java.util.concurrent.*;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
 
 public class Connection implements Closeable {
     // logger
@@ -33,6 +34,7 @@ public class Connection implements Closeable {
     public final int port;
 
     private final AtomicLong nextToken = new AtomicLong();
+    private final ExecutorService asyncExecutors = Executors.newCachedThreadPool();
 
     // private mutable
     private Optional<String> dbname;
@@ -44,6 +46,7 @@ public class Connection implements Closeable {
     Optional<SocketWrapper> socket = Optional.empty();
 
     private Map<Long, Cursor> cursorCache = new ConcurrentHashMap<>();
+    private final Map<Long, Boolean> asyncCursors = new ConcurrentHashMap<>();
 
     // execution stuff
     private ExecutorService exec;
@@ -160,6 +163,7 @@ public class Connection implements Closeable {
                 cursor.setError("Connection is closed.");
             }
             cursorCache.clear();
+            asyncCursors.clear();
 
             // handle current awaiters
             this.awaiters.values().stream().forEach(awaiter -> {
@@ -199,7 +203,7 @@ public class Connection implements Closeable {
      * @param deadline the timeout.
      * @return a completable future.
      */
-    private Future<Response> sendQuery(Query query, Optional<Long> deadline) {
+    private CompletableFuture<Response> sendQuery(Query query, Optional<Long> deadline) {
         // check if response pump is running
         if (!exec.isShutdown() && !exec.isTerminated()) {
             final CompletableFuture<Response> awaiter = new CompletableFuture<>();
@@ -208,7 +212,7 @@ public class Connection implements Closeable {
                 lock.lock();
                 socket.orElseThrow(() -> new ReqlDriverError("No socket available."))
                         .write(query.serialize());
-                return awaiter.toCompletableFuture();
+                return awaiter;
             } finally {
                 lock.unlock();
             }
@@ -313,6 +317,65 @@ public class Connection implements Closeable {
         return runQuery(q, pojoClass, timeout);
     }
 
+    public <P> long run(ReqlAst term, OptArgs globalOpts, Optional<Class<P>> pojoClass, Optional<Long> timeout, Consumer<P> consumer) {
+        setDefaultDB(globalOpts);
+        Query q = Query.start(newToken(), term, globalOpts);
+        return run(q, pojoClass, timeout, consumer);
+    }
+
+    public <P> long run(Query q, Optional<Class<P>> pojoClass, Optional<Long> timeout, Consumer<P> consumer) {
+        // As this method is invoked every time additional contents are requested from the cursor
+        // it's possible for the token to already exist, and that a stop may have been requested, which
+        // would set the value to false.  As such, don't overwrite it.
+        asyncCursors.putIfAbsent(q.token, true);
+        CompletableFuture<Response> future = this.sendQuery(q, timeout);
+        // Run our handler async to avoid potentially blocking the response pump.
+        future.whenCompleteAsync(((response, throwable) -> {
+            if (throwable != null) {
+                return;
+            }
+            Converter.FormatOptions fmt = new Converter.FormatOptions(q.globalOptions);
+            if (response.isAtom())
+            {
+                try {
+                    Object value = ((List) Converter.convertPseudotypes(response.data, fmt)).get(0);
+                    consumer.accept(Util.convertToPojo(value, pojoClass));
+                } catch (IndexOutOfBoundsException ex) {
+                    throw new ReqlDriverError("Atom response was empty!", ex);
+                }
+            } else if (response.isSequence() || response.isPartial()) {
+                response.data.forEach(item -> {
+                    Object value = Converter.convertPseudotypes(item, fmt);
+                    consumer.accept(Util.convertToPojo(value, pojoClass));
+                });
+                if (response.isPartial()) {
+                    // A value of true in asyncCursors indicates that we should continue.
+                    // A value of false in asyncCursors indicates that we should stop, so we remove the mapping and send
+                    // a stop.
+                    if (this.asyncCursors.compute(response.token, (token, bool) -> bool ? true : null) != null) {
+                        run(Query.continue_(response.token), pojoClass, timeout, consumer);
+                    } else {
+                        runQueryNoreply(Query.stop(response.token));
+                    }
+                } else {
+                    // If we received a sequence complete then we no longer have a cursor.
+                    this.asyncCursors.remove(response.token);
+                }
+            }
+        }), asyncExecutors);
+        return q.token;
+    }
+
+    /**
+     * Signals that the next time a response is received for the specified async cursor it
+     * should be closed rather than request additional data.
+     * @param token
+     */
+    public void stopAsyncCursor(long token) {
+        // There's no putIfPresent, and we don't want to potentially pollute the map with tokens that don't exist
+        // or were already cancelled.
+        this.asyncCursors.computeIfPresent(token, (key, value) -> false);
+    }
     public void runNoReply(ReqlAst term, OptArgs globalOpts) {
         setDefaultDB(globalOpts);
         globalOpts.with("noreply", true);

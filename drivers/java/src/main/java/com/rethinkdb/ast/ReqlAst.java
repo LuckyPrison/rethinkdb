@@ -10,6 +10,7 @@ import org.json.simple.JSONArray;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /** Base class for all reql queries.
@@ -65,6 +66,9 @@ public class ReqlAst {
         return conn.run(this, new OptArgs(), Optional.empty());
     }
 
+    public <T> long run(Connection conn, Consumer<T> consumer) {
+        return conn.run(this, new OptArgs(), Optional.empty(), Optional.empty(), consumer);
+    }
     /**
      * Runs this query via connection {@code conn} with options {@code runOpts} and returns an atom result
      * or a sequence result as a cursor. The atom result either has a primitive type (e.g., {@code Integer})
