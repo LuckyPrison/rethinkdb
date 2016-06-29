@@ -12,6 +12,7 @@ import org.junit.rules.ExpectedException;
 
 import java.time.OffsetDateTime;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeoutException;
@@ -403,6 +404,35 @@ public class RethinkDBTest{
 
         final Cursor<TestPojo> all = r.db(dbName).table(tableName).run(conn);
         assertEquals(total, all.toList().size());
+    }
+
+    @Test(timeout=20000)
+    public void testAsyncCursor() throws TimeoutException, InterruptedException {
+
+        final Waiter waiter = new Waiter();
+        for (int i =0; i < 20; i++) {
+            r.db(dbName).table(tableName).insert(r.hashMap("data", i).with("field", "a")).run(conn);
+        }
+        r.db(dbName).table(tableName).filter(row -> row.g("field").eq("a")).run(conn, (HashMap<String, Object> result) -> {
+            waiter.resume();
+        });
+        waiter.await(2500, 20);
+
+    }
+
+    @Test(timeout = 20000)
+    public void testAsyncChangefeed() throws TimeoutException, InterruptedException {
+        final Waiter waiter = new Waiter();
+        r.db(dbName).table(tableName).changes().run(conn, (HashMap<String, Object> result) -> {
+            result = (HashMap) result.get("new_val");
+            waiter.assertNotNull(result.get("data"));
+            waiter.assertEquals("a", result.get("field"));
+            waiter.resume();
+        });
+        for (int i =0; i < 20; i++) {
+            r.db(dbName).table(tableName).insert(r.hashMap("data", i).with("field", "a")).run(conn);
+        }
+        waiter.await(2500, 20);
     }
 }
 

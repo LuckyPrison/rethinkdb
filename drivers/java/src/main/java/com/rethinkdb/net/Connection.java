@@ -346,7 +346,12 @@ public class Connection implements Closeable {
             } else if (response.isSequence() || response.isPartial()) {
                 response.data.forEach(item -> {
                     Object value = Converter.convertPseudotypes(item, fmt);
-                    consumer.accept(Util.convertToPojo(value, pojoClass));
+                    P converted = Util.convertToPojo(value, pojoClass);
+                    try {
+                        consumer.accept(converted);
+                    } catch(Exception e) {
+                        e.printStackTrace();
+                    }
                 });
                 if (response.isPartial()) {
                     // A value of true in asyncCursors indicates that we should continue.
