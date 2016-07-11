@@ -23,4 +23,19 @@ public class ConnectionFactory extends BasePooledObjectFactory<Connection> {
 	{
 		return new DefaultPooledObject<>(obj);
 	}
+
+	@Override
+	public boolean validateObject(PooledObject<Connection> p)
+	{
+		return p.getObject().isOpen();
+	}
+
+	@Override
+	public void destroyObject(PooledObject<Connection> p) throws Exception
+	{
+		if (p.getObject().isOpen())
+		{
+			p.getObject().close();
+		}
+	}
 }
